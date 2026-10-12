@@ -38,6 +38,9 @@ export class Engine {
   private readonly sealer: TokenSealer
   readonly prover: Prover
   private readonly now: () => number
+  // Consumed challenge tokens (jti -> expiry, unix sec). A token may be
+  // answered once; entries are pruned as they expire so this stays bounded.
+  private readonly seen = new Map<string, number>()
 
   constructor(cfg: ICaptchaConfig, deps: EngineDeps = {}) {
     this.cfg = cfg
@@ -49,6 +52,14 @@ export class Engine {
 
   private nowSec(): number {
     return Math.floor(this.now() / 1000)
+  }
+
+  /** Drop consumed-token records whose challenge TTL has elapsed. */
+  private pruneSeen(): void {
+    const now = this.nowSec()
+    for (const [jti, exp] of this.seen) {
+      if (exp <= now) this.seen.delete(jti)
+    }
   }
 
   /** Pick a generator for `difficulty` (optionally constrained to `types`) and
@@ -121,6 +132,15 @@ export class Engine {
       throw new InvalidTokenError('invalid or tampered token')
     }
     if (this.nowSec() > state.exp) throw new ExpiredChallengeError('challenge expired')
+
+    // Single-use: bind the attempt budget and difficulty escalation to one
+    // logical session. Without this the client can replay the original
+    // (attempts: 0) token unchanged, so the budget never trips and the
+    // difficulty never rises — a scripted solver just brute-forces the small
+    // answer space at the issued level and collects a genuine proof.
+    this.pruneSeen()
+    if (this.seen.has(state.jti)) throw new InvalidTokenError('challenge token already used')
+    this.seen.set(state.jti, state.exp)
 
     const gen = this.registry.byType.get(state.type)
     const correct = gen?.grade
